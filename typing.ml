@@ -204,62 +204,72 @@ type e =
 | TConst of int
 | TVoid
 
-and texpr = { expr: e; typ: typ }
+and texpr = { expr: e; cls:typ; typ: typ }
 
 module Env = Map.Make(String)
 
-let free_vars_of_env env =
+let free_vars_of_env f env =
   Env.fold (fun _ schm set ->
-    Typvars.union set (free_vars_of_scheme schm)) env Typvars.empty
+    Typvars.union set (free_vars_of_scheme (f schm))) env Typvars.empty
 
 let mono t = { qual = Typvars.empty; shape = t }
 
-let poly env t =
-  let qual = Typvars.diff (free_vars_of_typ t) (free_vars_of_env env) in
+let poly f env t =
+  let qual = Typvars.diff (free_vars_of_typ t) (free_vars_of_env f env) in
   { qual; shape = t }
 
 let rec infer env expr =
   match expr with
-  | Void -> { expr = TVoid; typ = Unit }, env
-  | Const c -> { expr = TConst c; typ = Int }, env
+  | Void -> { expr = TVoid; cls = Unit;
+                            typ = Unit }, env
+  | Const c -> { expr = TConst c; cls = Int;
+                                  typ = Typvar (Typvar.fresh()) }, env
   | Ident id ->
     let schm = Env.find id env in
-    { expr = TIdent id; typ = instance schm }, env
+    { expr = TIdent id; cls = instance (fst schm);
+                        typ = instance (snd schm) }, env
   | Seq (e1, e2) ->
     let te1, env1 = infer env e1 in
     let te2, env2 = infer env1 e2 in
-    { expr = TSeq (te1, te2); typ = te2.typ }, env2
+    { expr = TSeq (te1, te2); cls = te2.cls;
+                              typ = te2.typ }, env2
   | Eq (e1, e2) ->
     let te1, _ = infer env e1 in
     let te2, _ = infer env e2 in
-    unify te1.typ te2.typ;
-    { expr = TEq (te1, te2); typ = Bool }, env
+    unify te1.cls te2.cls;
+    { expr = TEq (te1, te2); cls = Bool;
+                             typ = Bool }, env
   | Sum (e1, e2) ->
     let te1, _ = infer env e1 in
     let te2, _ = infer env e2 in
-    unify te1.typ Int;
-    unify te2.typ Int;
-    { expr = TSum (te1, te2); typ = Int }, env
+    unify te1.cls Int;
+    unify te2.cls Int;
+    { expr = TSum (te1, te2); cls = Int;
+                              typ = Typvar (Typvar.fresh()) }, env
   | Var (id, annot, e) ->
     let te, _ = infer env e in
     begin match annot with
-    | Some a -> unify te.typ (class_of_annot a)
+    | Some a -> unify te.cls (class_of_annot a);
+                unify te.typ (typ_of_annot a)
     | None -> ()
     end;
-    let schm = mono te.typ in
+    let schm = (mono te.cls, mono te.typ) in
     let env = Env.add id schm env in
-    { expr = TVar (id, annot, te); typ = Unit }, env
+    { expr = TVar (id, annot, te); cls = Unit;
+                                   typ = Unit }, env
   | Let (id, annot, e) ->
     let te, _ = infer env e in
     begin match annot with
-    | Some a -> unify te.typ (class_of_annot a)
+    | Some a -> unify te.cls (class_of_annot a);
+                unify te.typ (typ_of_annot a)
     | None -> ()
     end;
-    let schm = poly env te.typ in
+    let schm = (poly fst env te.cls, poly snd env te.typ) in
     let env = Env.add id schm env in
-    { expr = TLet (id, annot, te); typ = Unit }, env
+    { expr = TLet (id, annot, te); cls = Unit;
+                                   typ = Unit }, env
 
 
-  | _ -> { expr = TVoid; typ = Unit }, env
+  | _ -> { expr = TVoid; cls = Unit; typ = Unit }, env
 
 
