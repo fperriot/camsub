@@ -4,18 +4,22 @@ type 'a typp = Int | Uint | Long | Bool | Unit | Fun of 'a typp * 'a typp
 
 module Typvar = struct
 
-type t = r BatUref.t and r = { id: int; mutable def: t typp option }
-
+type t = r BatUref.t and r = { id: int;
+                               mutable def: t typp option;
+                               num: bool BatUref.t }
 let counter = ref 0
 
 let fresh () =
   let id = !counter in
   incr counter;
-  BatUref.uref { id; def = None }
+  let num = BatUref.uref false in
+  BatUref.uref { id; def = None; num }
 
 let id v = (BatUref.uget v).id
-
 let def v = (BatUref.uget v).def
+let num v = BatUref.uget (BatUref.uget v).num
+
+let restrict v = BatUref.uset (BatUref.uget v).num true
 
 let define v t = (BatUref.uget v).def <- Some t
 
@@ -29,6 +33,12 @@ end
 
 type typ = Typvar.t typp
 
+(*
+let deref = function
+  | Typvar v -> (match Typvar.def v with Some t -> t | None -> Typvar v)
+  | t -> t
+*)
+
 let rec occur v t =
   match t with
   | Int | Uint | Long | Bool | Unit -> false
@@ -41,43 +51,67 @@ let rec occur v t =
 exception Unification_failure
 exception Recursive_type
 
-let rec unify_vars v w =
-  let sel a b =
-    match a.Typvar.def, b.Typvar.def with
-    | None, _ -> b
-    | _, None -> a
-    | Some t, Some t' ->
-      if occur v t' || occur w t then raise Recursive_type;
-      unify t t';
-      a
-  in
-  if not (Typvar.equal v w) then BatUref.unite ~sel v w
-
-and unify t t' =
-  let def v t =
+let rec unify ?(weak=true) t t' =
+  let var_with_numeric v t =
     match Typvar.def v with
-    | None -> Typvar.define v t
-    | Some x -> unify t x
+    | None ->
+      Typvar.restrict v;
+      if not weak then Typvar.define v t
+    | Some t' ->
+      unify ~weak t t'
+  in
+  let var_with_nonnumeric v t =
+    if Typvar.num v then raise Unification_failure;
+    match Typvar.def v with
+    | None ->
+      if occur v t then raise Recursive_type;
+      Typvar.define v t
+    | Some t' ->
+      unify ~weak:false t t'
   in
   match t, t' with
-  | Int, Int | Uint, Uint | Long, Long | Bool, Bool | Unit, Unit -> ()
-  | Fun (t1, t2), Fun (t1', t2') -> unify t1 t1';
-                                    unify t2 t2'
+  | Int, Int
+  | Uint, Uint
+  | Long, Long
+  | Bool, Bool
+  | Unit, Unit -> ()
+  | Int, Uint
+  | Int, Long
+  | Uint, Int
+  | Uint, Long
+  | Long, Int
+  | Long, Uint -> if not weak then raise Unification_failure
+  | Fun (t1, t2), Fun (t1', t2') -> unify ~weak:false t1 t1';
+                                    unify ~weak:false t2 t2'
   | Int, Typvar v
   | Uint, Typvar v
-  | Long, Typvar v
+  | Long, Typvar v -> var_with_numeric v t
   | Bool, Typvar v
   | Unit, Typvar v
-  | Fun _, Typvar v -> def v t
+  | Fun _, Typvar v -> var_with_nonnumeric v t
   | Typvar v, Int
   | Typvar v, Uint
-  | Typvar v, Long
+  | Typvar v, Long -> var_with_numeric v t'
   | Typvar v, Bool
   | Typvar v, Unit
-  | Typvar v, Fun _ -> def v t'
-  | Typvar v, Typvar w -> unify_vars v w
-  | Int, _ | Uint, _ | Long, _ | Bool, _ | Unit, _ | Fun _, _ ->
-    raise Unification_failure
+  | Typvar v, Fun _ -> var_with_nonnumeric v t'
+  | Typvar v, Typvar w ->
+    if not (Typvar.equal v w) then begin
+      let rv = BatUref.uget v in
+      let rw = BatUref.uget w in
+      BatUref.unite ~sel:( || ) rv.Typvar.num rw.Typvar.num;
+      match rv.Typvar.def, rw.Typvar.def with
+      | None, None -> if not weak then BatUref.unite v w
+      | Some t, None -> unify ~weak t t'
+      | None, Some t' -> unify ~weak t t'
+      | Some t, Some t' -> unify ~weak t t'
+    end
+  | Int, _
+  | Uint, _
+  | Long, _
+  | Bool, _
+  | Unit, _
+  | Fun _, _ -> raise Unification_failure
 
 module Typvars = Set.Make(Typvar)
 
