@@ -1,63 +1,10 @@
 
-type 'a typ = Int | Uint | Long | Bool | Unit | Fun of 'a typ * 'a typ
+type 'a typp = Int | Uint | Long | Bool | Unit | Fun of 'a typp * 'a typp
   | Typvar of 'a
-
-type 'a annot = 'a typ
-
-type 'a parm = string * 'a annot option
-
-type 'a expr =
-| Let of string * 'a annot option * 'a expr
-| Var of string * 'a annot option * 'a expr
-| Ident of string
-| Annot of 'a expr * 'a annot
-| Letfun of string * 'a parm list * 'a expr
-| Assign of 'a expr * 'a expr
-| Apply of 'a expr * 'a expr
-| Sum of 'a expr * 'a expr
-| Eq of 'a expr * 'a expr
-| Lt of 'a expr * 'a expr
-| If of 'a expr * 'a expr * 'a expr
-| Seq of 'a expr * 'a expr
-| Const of int
-| Void
-
-(*
-  let f (x : int) y (z : uint) = if x < y then x + y else x + z
-*)
-
-let test1 =
-  Letfun ("f", [("x", Some Int); ("y", None); ("z", Some Uint)],
-    If (Lt (Ident "x", Ident "y"),
-      Sum (Ident "x", Ident "y"),
-      Sum (Ident "x", Ident "z")))
-
-module Typed = struct
-
-type 'a parm = string * 'a typ
-
-type 'a e =
-| Let of string * 'a typ * 'a expr
-| Var of string * 'a typ * 'a expr
-| Ident of string
-| Letfun of string * 'a parm list * 'a expr
-| Assign of 'a expr * 'a expr
-| Apply of 'a expr * 'a expr
-| Sum of 'a expr * 'a expr
-| Eq of 'a expr * 'a expr
-| Lt of 'a expr * 'a expr
-| If of 'a expr * 'a expr * 'a expr
-| Seq of 'a expr * 'a expr
-| Const of int
-| Void
-
-and 'a expr = { expr: 'a e; typ: 'a typ }
-
-end
 
 module Typvar = struct
 
-type t = r BatUref.t and r = { id: int; mutable def: t typ option }
+type t = r BatUref.t and r = { id: int; mutable def: t typp option }
 
 let counter = ref 0
 
@@ -80,6 +27,8 @@ let hash = id
 
 end
 
+type typ = Typvar.t typp
+
 let rec occur v t =
   match t with
   | Int | Uint | Long | Bool | Unit -> false
@@ -92,28 +41,28 @@ let rec occur v t =
 exception Unification_failure
 exception Recursive_type
 
-let rec unify v w =
+let rec unify_vars v w =
   let sel a b =
     match a.Typvar.def, b.Typvar.def with
     | None, _ -> b
     | _, None -> a
     | Some t, Some t' ->
       if occur v t' || occur w t then raise Recursive_type;
-      unify_types t t';
+      unify t t';
       a
   in
   if not (Typvar.equal v w) then BatUref.unite ~sel v w
 
-and unify_types t t' =
+and unify t t' =
   let def v t =
     match Typvar.def v with
     | None -> Typvar.define v t
-    | Some x -> unify_types t x
+    | Some x -> unify t x
   in
   match t, t' with
   | Int, Int | Uint, Uint | Long, Long | Bool, Bool | Unit, Unit -> ()
-  | Fun (t1, t2), Fun (t1', t2') -> unify_types t1 t1';
-                                    unify_types t2 t2'
+  | Fun (t1, t2), Fun (t1', t2') -> unify t1 t1';
+                                    unify t2 t2'
   | Int, Typvar v
   | Uint, Typvar v
   | Long, Typvar v
@@ -126,7 +75,7 @@ and unify_types t t' =
   | Typvar v, Bool
   | Typvar v, Unit
   | Typvar v, Fun _ -> def v t'
-  | Typvar v, Typvar w -> unify v w
+  | Typvar v, Typvar w -> unify_vars v w
   | Int, _ | Uint, _ | Long, _ | Bool, _ | Unit, _ | Fun _, _ ->
     raise Unification_failure
 
@@ -143,8 +92,10 @@ let rec free_vars_of_typ = function
 
 type scheme = {
   qual: Typvars.t;    (* Universally qualified type variables *)
-  shape: Typvar.t typ
+  shape: typ
 }
+
+let free_vars_of_scheme s = Typvars.diff (free_vars_of_typ s.shape) s.qual
 
 (* instantiate a type scheme by replacing all universally qualified type
    variables occuring in the scheme with fresh type vars *)
@@ -171,58 +122,144 @@ let instance schm =
     appearing free in the monotype and not free in the env
  *)
 
-let class_of_var = H.create 0
+type annot = int typp
 
-let alloc_var_pair() =
-  let v = Typvar.fresh() in
-  let w = Typvar.fresh() in
-  H.add class_of_var v w;
-  v, w
+let typ_of_annot a =
+  let h = Hashtbl.create 0 in
+  let v i =
+    try Hashtbl.find h i with Not_found ->
+      let v = Typvar.fresh() in
+      Hashtbl.add h i v; v
+  in
+  let rec f = function
+  | Int -> Int
+  | Uint -> Uint
+  | Long -> Long
+  | Bool -> Bool
+  | Unit -> Unit
+  | Fun (t1, t2) -> Fun (f t1, f t2)
+  | Typvar i -> Typvar (v i)
+  in
+  f a
 
-let rec class_of_typ = function
+let class_of_annot a =
+  let h = Hashtbl.create 0 in
+  let v i =
+    try Hashtbl.find h i with Not_found ->
+      let v = Typvar.fresh() in
+      Hashtbl.add h i v; v
+  in
+  let rec f = function
   | Int | Uint | Long -> Int
   | Bool -> Bool
   | Unit -> Unit
-  | Fun (t1, t2) -> Fun (class_of_typ t1, class_of_typ t2)
-  | Typvar v -> Typvar (H.find class_of_var v)
+  | Fun (t1, t2) -> Fun (f t1, f t2)
+  | Typvar i -> Typvar (v i)
+  in
+  f a
 
-let unify_classes t t' =
-  unify_types (class_of_typ t) (class_of_typ t')
+type parm = string * annot option
+
+type expr =
+| Let of string * annot option * expr
+| Var of string * annot option * expr
+| Ident of string
+| Annot of expr * annot
+| Letfun of string * parm list * expr
+| Assign of expr * expr
+| Apply of expr * expr
+| Sum of expr * expr
+| Eq of expr * expr
+| Lt of expr * expr
+| If of expr * expr * expr
+| Seq of expr * expr
+| Const of int
+| Void
+
+(*
+  let f (x : int) y (z : uint) = if x < y then x + y else x + z
+*)
+
+let test1 =
+  Letfun ("f", [("x", Some Int); ("y", None); ("z", Some Uint)],
+    If (Lt (Ident "x", Ident "y"),
+      Sum (Ident "x", Ident "y"),
+      Sum (Ident "x", Ident "z")))
+
+type tparm = string * annot option
+
+type e =
+| TLet of string * annot option * texpr
+| TVar of string * annot option * texpr
+| TIdent of string
+| TAnnot of texpr * annot
+| TLetfun of string * tparm list * texpr
+| TAssign of texpr * texpr
+| TApply of texpr * texpr
+| TSum of texpr * texpr
+| TEq of texpr * texpr
+| TLt of texpr * texpr
+| TIf of texpr * texpr * texpr
+| TSeq of texpr * texpr
+| TConst of int
+| TVoid
+
+and texpr = { expr: e; typ: typ }
 
 module Env = Map.Make(String)
 
-let constraints = ref []
+let free_vars_of_env env =
+  Env.fold (fun _ schm set ->
+    Typvars.union set (free_vars_of_scheme schm)) env Typvars.empty
 
-let unify_weak t t' =
-  unify_classes t t';
-  constraints := (t, t') :: !constraints
+let mono t = { qual = Typvars.empty; shape = t }
+
+let poly env t =
+  let qual = Typvars.diff (free_vars_of_typ t) (free_vars_of_env env) in
+  { qual; shape = t }
 
 let rec infer env expr =
-  let module T = Typed in
   match expr with
-  | Void -> { T.expr = T.Void; typ = Unit }, env
-  | Const c ->
-    let v, w = alloc_var_pair() in
-    Typvar.define w Int;
-    { T.expr = T.Const c; typ = Typvar v }, env
+  | Void -> { expr = TVoid; typ = Unit }, env
+  | Const c -> { expr = TConst c; typ = Int }, env
   | Ident id ->
-    { T.expr = T.Ident id; typ = Env.find id env }, env
+    let schm = Env.find id env in
+    { expr = TIdent id; typ = instance schm }, env
   | Seq (e1, e2) ->
     let te1, env1 = infer env e1 in
     let te2, env2 = infer env1 e2 in
-    { T.expr = T.Seq (te1, te2); typ = te2.T.typ }, env2
+    { expr = TSeq (te1, te2); typ = te2.typ }, env2
   | Eq (e1, e2) ->
     let te1, _ = infer env e1 in
     let te2, _ = infer env e2 in
-    unify_weak te1.T.typ te2.T.typ;
-    { T.expr = T.Eq (te1, te2); typ = Bool }, env
+    unify te1.typ te2.typ;
+    { expr = TEq (te1, te2); typ = Bool }, env
   | Sum (e1, e2) ->
     let te1, _ = infer env e1 in
     let te2, _ = infer env e2 in
-    unify_classes te1.T.typ Int;
-    unify_weak te1.T.typ te2.T.typ;
-    let v, w = alloc_var_pair() in
-    Typvar.define w Int;
+    unify te1.typ Int;
+    unify te2.typ Int;
+    { expr = TSum (te1, te2); typ = Int }, env
+  | Var (id, annot, e) ->
+    let te, _ = infer env e in
+    begin match annot with
+    | Some a -> unify te.typ (class_of_annot a)
+    | None -> ()
+    end;
+    let schm = mono te.typ in
+    let env = Env.add id schm env in
+    { expr = TVar (id, annot, te); typ = Unit }, env
+  | Let (id, annot, e) ->
+    let te, _ = infer env e in
+    begin match annot with
+    | Some a -> unify te.typ (class_of_annot a)
+    | None -> ()
+    end;
+    let schm = poly env te.typ in
+    let env = Env.add id schm env in
+    { expr = TLet (id, annot, te); typ = Unit }, env
 
-  | _ -> { T.expr = T.Void; typ = Unit }, env
+
+  | _ -> { expr = TVoid; typ = Unit }, env
+
 
