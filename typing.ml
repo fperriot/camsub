@@ -2,45 +2,54 @@
 type 'a typp = Int | Uint | Long | Bool | Unit | Fun of 'a typp * 'a typp
   | Typvar of 'a
 
-module Typvar = struct
+type varclass = { repr_id: int; mutable num: bool }
 
-type t = r BatUref.t and r = { id: int;
-                               mutable def: t typp option;
-                               num: bool BatUref.t }
+type typvar = {
+  id: int;
+  klass: varclass BatUref.t;
+  def: typvar typp option BatUref.t;
+}
+
+module Typvar = struct
+  type t = typvar
+  let compare a b = Pervasives.compare a.id b.id
+  let equal a b = (a.id = b.id)
+  let hash a = a.id
+end
+
+module VH = Hashtbl.Make(Typvar)
+
+let vars = VH.create 0
+
 let counter = ref 0
 
-let fresh ?(numeric=false) () =
+let fresh_var ?(numeric=false) () =
   let id = !counter in
   incr counter;
-  let num = BatUref.uref numeric in
-  BatUref.uref { id; def = None; num }
+  let klass = BatUref.uref { repr_id = id; num = numeric } in
+  let def = BatUref.uref None in
+  let v = { id; def; klass } in
+  VH.add vars v ();
+  v
 
-let fresh_num () = fresh ~numeric:true ()
+let fresh_num () = fresh_var ~numeric:true ()
 
-let id v = (BatUref.uget v).id
-let def v = (BatUref.uget v).def
-let num v = BatUref.uget (BatUref.uget v).num
+let def v = BatUref.uget v.def
+let klass v = BatUref.uget v.klass
+let num v = (klass v).num
 
-let restrict v = BatUref.uset (BatUref.uget v).num true
+let restrict v = (klass v).num <- true
 
-let define v t = (BatUref.uget v).def <- Some t
-
-let compare a b = Pervasives.compare (id a) (id b)
-
-let equal = BatUref.equal
-
-let hash = id
-
-end
+let define v t = BatUref.uset v.def (Some t)
 
 type typ = Typvar.t typp
 
 let deref = function
-  | Typvar v -> (match Typvar.def v with Some t -> t | None -> Typvar v)
+  | Typvar v -> (match def v with Some t -> t | None -> Typvar v)
   | t -> t
 
 let rec occur v t =
-  assert (Typvar.def v = None);
+  assert (def v = None);
   match deref t with
   | Int | Uint | Long | Bool | Unit -> false
   | Fun (t1, t2) -> occur v t1 || occur v t2
@@ -51,15 +60,15 @@ exception Recursive_type
 
 let rec unify ?(weak=true) t t' =
   let var_with_numeric v t =
-    assert (Typvar.def v = None);
-    Typvar.restrict v;
-    if not weak then Typvar.define v t
+    assert (def v = None);
+    restrict v;
+    if not weak then define v t
   in
   let var_with_nonnumeric v t =
-    assert (Typvar.def v = None);
-    if Typvar.num v then raise Unification_failure;
+    assert (def v = None);
+    if num v then raise Unification_failure;
     if occur v t then raise Recursive_type;
-    Typvar.define v t
+    define v t
   in
   let t, t' = deref t, deref t' in
   match t, t' with
@@ -90,10 +99,9 @@ let rec unify ?(weak=true) t t' =
   | Typvar v, Fun _ -> var_with_nonnumeric v t'
   | Typvar v, Typvar w ->
     if not (Typvar.equal v w) then begin
-      let rv = BatUref.uget v in
-      let rw = BatUref.uget w in
-      BatUref.unite ~sel:( || ) rv.Typvar.num rw.Typvar.num;
-      if not weak then BatUref.unite v w
+      let sel kv kw = { kv with num = kv.num || kw.num } in
+      BatUref.unite ~sel v.klass w.klass;
+      if not weak then BatUref.unite v.def w.def
     end
   | Int, _
   | Uint, _
@@ -112,7 +120,7 @@ let rec free_vars_of_typ t =
   | Fun (t1, t2) -> Typvars.union (free_vars_of_typ t1)
                                   (free_vars_of_typ t2)
   | Typvar v ->
-    if Typvar.num v then Typvars.empty else Typvars.singleton v
+    if num v then Typvars.empty else Typvars.singleton v
 
 type scheme = {
   qual: Typvars.t;    (* Universally qualified type variables *)
@@ -124,17 +132,15 @@ let free_vars_of_scheme s = Typvars.diff (free_vars_of_typ s.shape) s.qual
 (* instantiate a type scheme by replacing all universally qualified type
    variables occuring in the scheme with fresh type vars *)
 
-module H = Hashtbl.Make(Typvar)
-
 let instance schm =
   let n = Typvars.cardinal schm.qual in
-  let h = H.create n in
-  Typvars.iter (fun v -> H.add h v (Typvar.fresh())) schm.qual;
+  let h = VH.create n in
+  Typvars.iter (fun v -> VH.add h v (fresh_var())) schm.qual;
   let rec inst t =
-    match t with
+    match deref t with
     | Int | Uint | Long | Bool | Unit -> t
     | Fun (t1, t2) -> Fun (inst t1, inst t2)
-    | Typvar v -> Typvar (try H.find h v with Not_found -> v)
+    | Typvar v -> Typvar (try VH.find h v with Not_found -> v)
   in
   inst schm.shape
 
@@ -144,7 +150,7 @@ let typ_of_annot a =
   let h = Hashtbl.create 0 in
   let v i =
     try Hashtbl.find h i with Not_found ->
-      let v = Typvar.fresh() in
+      let v = fresh_var() in
       Hashtbl.add h i v; v
   in
   let rec f = function
@@ -258,7 +264,7 @@ let poly env t =
 let rec infer env expr =
   match expr with
   | Void -> { expr = TVoid; typ = Unit }, env
-  | Const c -> { expr = TConst c; typ = Typvar (Typvar.fresh_num()) }, env
+  | Const c -> { expr = TConst c; typ = Typvar (fresh_num()) }, env
   | Ident id ->
     let schm = Env.find id env in
     { expr = TIdent id; typ = instance schm }, env
@@ -279,7 +285,7 @@ let rec infer env expr =
   | Sum (e1, e2) ->
     let te1, _ = infer env e1 in
     let te2, _ = infer env e2 in
-    let typ = Typvar (Typvar.fresh_num()) in
+    let typ = Typvar (fresh_num()) in
     unify te1.typ te2.typ;
     unify te1.typ typ;
     { expr = TSum (te1, te2); typ }, env
@@ -296,7 +302,7 @@ let rec infer env expr =
     let typ =
       match annot with
       | Some a -> typ_of_annot a
-      | None -> Typvar (Typvar.fresh())
+      | None -> Typvar (fresh_var())
     in
     let inner_env = if rec_ then Env.add id (mono typ) env else env in
     let te, _ = infer inner_env e in
@@ -308,7 +314,7 @@ let rec infer env expr =
     let arg_typ =
       match annot with
       | Some a -> typ_of_annot a
-      | None -> Typvar (Typvar.fresh())
+      | None -> Typvar (fresh_var())
     in
     let inner_env = Env.add arg (mono arg_typ) env in
     let te, _ = infer inner_env e in
@@ -316,8 +322,8 @@ let rec infer env expr =
   | App (e1, e2) ->
     let te1, _ = infer env e1 in
     let te2, _ = infer env e2 in
-    let arg_typ = Typvar (Typvar.fresh()) in
-    let ret_typ = Typvar (Typvar.fresh()) in
+    let arg_typ = Typvar (fresh_var()) in
+    let ret_typ = Typvar (fresh_var()) in
     unify_strong te1.typ (Fun (arg_typ, ret_typ));
     unify te2.typ arg_typ;
     { expr = TApp (te1, te2); typ = ret_typ }, env
@@ -338,6 +344,7 @@ let rec infer env expr =
     unify te1.typ te2.typ;
     { expr = TAssign (te1, te2); typ = Unit }, env
 
+(*
 let rec fold f v e =
   match e.expr with
   | TVoid
@@ -370,8 +377,14 @@ let collect_types =
     | TLt _
     | TSum _
     | TIf _ -> e.typ :: acc) []
+*)
 
-
+(* TODO
+  - gather all type variables from the vars hash table
+  - group the numeric vars by class, keeping track of any definition for a var
+    within a class. All defs within a class must be the same (numeric) type
+  - If there's a class without any def, define the whole class as int
+*)
 
 (****)
 
@@ -387,16 +400,16 @@ let rec s_typ = function
 | Typvar v -> s_var v
 
 and s_var v =
-  match Typvar.def v with
+  match def v with
   | None ->
-    let i = string_of_int (Typvar.id v) in
-    if Typvar.num v then "N" ^ i else i
+    let i = string_of_int v.id in
+    if num v then "N" ^ i else i
   | Some t -> s_typ t
 
 let s_set vars =
   if Typvars.cardinal vars = 0 then "" else "forall" ^
   Typvars.fold (fun v txt ->
-    " " ^ string_of_int (Typvar.id v) ^ txt) vars ". "
+    " " ^ string_of_int v.id ^ txt) vars ". "
 
 let s_schm schm = s_set schm.qual ^ s_typ schm.shape
 
