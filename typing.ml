@@ -35,42 +35,33 @@ end
 
 type typ = Typvar.t typp
 
-(*
 let deref = function
   | Typvar v -> (match Typvar.def v with Some t -> t | None -> Typvar v)
   | t -> t
-*)
 
 let rec occur v t =
-  match t with
+  assert (Typvar.def v = None);
+  match deref t with
   | Int | Uint | Long | Bool | Unit -> false
   | Fun (t1, t2) -> occur v t1 || occur v t2
-  | Typvar w ->
-    match Typvar.def w with
-    | None -> Typvar.equal v w
-    | Some t' -> Typvar.equal v w || occur v t'
+  | Typvar w -> Typvar.equal v w
 
 exception Unification_failure
 exception Recursive_type
 
 let rec unify ?(weak=true) t t' =
   let var_with_numeric v t =
-    match Typvar.def v with
-    | None ->
-      Typvar.restrict v;
-      if not weak then Typvar.define v t
-    | Some t' ->
-      unify ~weak t t'
+    assert (Typvar.def v = None);
+    Typvar.restrict v;
+    if not weak then Typvar.define v t
   in
   let var_with_nonnumeric v t =
+    assert (Typvar.def v = None);
     if Typvar.num v then raise Unification_failure;
-    match Typvar.def v with
-    | None ->
-      if occur v t then raise Recursive_type;
-      Typvar.define v t
-    | Some t' ->
-      unify_strong t t'
+    if occur v t then raise Recursive_type;
+    Typvar.define v t
   in
+  let t, t' = deref t, deref t' in
   match t, t' with
   | Int, Int
   | Uint, Uint
@@ -102,11 +93,7 @@ let rec unify ?(weak=true) t t' =
       let rv = BatUref.uget v in
       let rw = BatUref.uget w in
       BatUref.unite ~sel:( || ) rv.Typvar.num rw.Typvar.num;
-      match rv.Typvar.def, rw.Typvar.def with
-      | None, None -> if not weak then BatUref.unite v w
-      | Some t, None -> unify ~weak t t'
-      | None, Some t' -> unify ~weak t t'
-      | Some t, Some t' -> unify ~weak t t'
+      if not weak then BatUref.unite v w
     end
   | Int, _
   | Uint, _
@@ -119,14 +106,13 @@ and unify_strong t t' = unify ~weak:false t t'
 
 module Typvars = Set.Make(Typvar)
 
-let rec free_vars_of_typ = function
+let rec free_vars_of_typ t =
+  match deref t with
   | Int | Uint | Long | Bool | Unit -> Typvars.empty
   | Fun (t1, t2) -> Typvars.union (free_vars_of_typ t1)
                                   (free_vars_of_typ t2)
   | Typvar v ->
-    match Typvar.def v with
-    | None -> if Typvar.num v then Typvars.empty else Typvars.singleton v
-    | Some t -> free_vars_of_typ t
+    if Typvar.num v then Typvars.empty else Typvars.singleton v
 
 type scheme = {
   qual: Typvars.t;    (* Universally qualified type variables *)
@@ -151,14 +137,6 @@ let instance schm =
     | Typvar v -> Typvar (try H.find h v with Not_found -> v)
   in
   inst schm.shape
-
-(* TODO
-  - Maintain an environment associating variable names with type schemes
-  - As part of the env, maintain a set of free variables occuring in the
-    type schemes of all previous expressions
-  - When infering the type of a let-expression, generalize the type vars
-    appearing free in the monotype and not free in the env
- *)
 
 type annot = int typp
 
@@ -230,18 +208,18 @@ let test3 =
 let test4 =
   Var ("f", None, Lambda ("x", None, Ident "x"))
 
-(* var f = fun x -> x; let a = f 0; let b = f (0 = 0) *)
+(* var f = fun x -> x; let a = f 0; let b = f (0 = 0) Error!*)
 
 let test5 =
   Seq (Var ("f", None, Lambda ("x", None, Ident "x")),
   Seq (Let (false, "a", None, App (Ident "f", Const 0)),
        Let (false, "b", None, App (Ident "f", Eq (Const 0, Const 0)))))
 
-(* 0 = (0 = 0) *)
+(* 0 = (0 = 0) Error! *)
 
 let test6 = Eq (Const 0, Eq (Const 0, Const 0))
 
-(* fun x -> x x *)
+(* fun x -> x x Error! *)
 
 let test7 = Lambda ("x", None, App (Ident "x", Ident "x"))
 
@@ -359,6 +337,40 @@ let rec infer env expr =
     let te2, _ = infer env e2 in
     unify te1.typ te2.typ;
     { expr = TAssign (te1, te2); typ = Unit }, env
+
+let rec fold f v e =
+  match e.expr with
+  | TVoid
+  | TConst _
+  | TIdent _ -> f v e
+  | TSeq (e1, e2)
+  | TAssign (e1, e2)
+  | TApp (e1, e2)
+  | TEq (e1, e2)
+  | TLt (e1, e2)
+  | TSum (e1, e2) -> fold f (f (fold f v e1) e) e2
+  | TIf (e1, e2, e3) -> fold f (fold f (fold f (f v e) e1) e2) e3
+  | TVar (_, _, e1)
+  | TLet (_, _, _, e1)
+  | TLambda (_, _, e1) -> fold f (f v e) e1
+
+let collect_types =
+  fold (fun acc e ->
+    match e.expr with
+    | TLet (_, _, t, _)
+    | TVar (_, t, _)
+    | TLambda (_, t, _) -> t :: e.typ :: acc
+    | TVoid
+    | TConst _
+    | TIdent _
+    | TSeq _
+    | TAssign _
+    | TApp _
+    | TEq _
+    | TLt _
+    | TSum _
+    | TIf _ -> e.typ :: acc) []
+
 
 
 (****)
