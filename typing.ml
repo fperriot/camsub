@@ -2,7 +2,7 @@
 type 'a typp = Int | Uint | Long | Bool | Unit | Fun of 'a typp * 'a typp
   | Typvar of 'a
 
-type varclass = { repr_id: int; mutable num: bool }
+type varclass = { class_id: int; mutable num: bool }
 
 type typvar = {
   id: int;
@@ -23,14 +23,18 @@ let vars = VH.create 0
 
 let counter = ref 0
 
-let fresh_var ?(numeric=false) () =
+let make_var t_opt klass =
   let id = !counter in
   incr counter;
-  let klass = BatUref.uref { repr_id = id; num = numeric } in
-  let def = BatUref.uref None in
-  let v = { id; def; klass } in
+  let v = { id; def = BatUref.uref t_opt; klass } in
   VH.add vars v ();
   v
+
+let fresh_var ?(numeric=false) () =
+  let class_id = !counter in
+  incr counter;
+  let klass = BatUref.uref { class_id; num = numeric } in
+  make_var None klass
 
 let fresh_num () = fresh_var ~numeric:true ()
 
@@ -41,6 +45,8 @@ let num v = (klass v).num
 let restrict v = (klass v).num <- true
 
 let define v t = BatUref.uset v.def (Some t)
+
+let anchor v t = ignore (make_var (Some t) v.klass)
 
 type typ = Typvar.t typp
 
@@ -62,7 +68,10 @@ let rec unify ?(weak=true) t t' =
   let var_with_numeric v t =
     assert (def v = None);
     restrict v;
+    (*
     if not weak then define v t
+    *)
+    if weak then anchor v t else define v t
   in
   let var_with_nonnumeric v t =
     assert (def v = None);
@@ -381,10 +390,46 @@ let collect_types =
 
 (* TODO
   - gather all type variables from the vars hash table
-  - group the numeric vars by class, keeping track of any definition for a var
-    within a class. All defs within a class must be the same (numeric) type
-  - If there's a class without any def, define the whole class as int
+  - group the vars by class
+  - unify all vars in non-numeric classes (Should it be done in the second
+    pass on the typed tree?)
+  - if there's a class where all vars are defined, just rely on type-checking
+    to make sure all the types are compatible with the operators
+  - if there's a numeric class without any def, define the whole class as int
+  - if there's a class with some undefined vars, and the rest of the vars all
+    defined as the same type, define the whole class as this common type
+  - otherwise, leave the vars undefined and rely on bottom-up type-checking
+  - reparse the tree and verify that all +, <, =, <- operators have compatible
+    arguments
 *)
+
+let iter_classes f =
+  let members = Hashtbl.create 0 in
+  let numeric = Hashtbl.create 0 in
+  VH.iter (fun v () ->
+    let k = klass v in
+    Hashtbl.replace numeric k.class_id k.num;
+    Hashtbl.add members k.class_id v) vars;
+  Hashtbl.iter (fun r n -> f ~numeric:n (Hashtbl.find_all members r)) numeric
+
+let filter_revmap f =
+  List.fold_left (fun acc x -> match f x with Some r -> r :: acc
+                                            | None -> acc) []
+
+let refine () =
+  iter_classes (fun ~numeric vars ->
+    if numeric then begin
+      let defs = filter_revmap def vars in
+      match defs with
+      | [] -> List.iter (fun v -> define v Int) vars
+      | d :: defs ->
+        if List.for_all (( = ) d) defs then
+          List.iter (fun v -> define v d) vars
+      end
+    else
+      match vars with
+      | [] -> assert(false)
+      | v :: vars -> List.iter (fun w -> unify (Typvar v) (Typvar w)) vars)
 
 (****)
 
