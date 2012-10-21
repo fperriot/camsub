@@ -19,7 +19,7 @@ end
 
 module VH = Hashtbl.Make(Typvar)
 
-let vars = VH.create 0
+let gvars = VH.create 0
 
 let counter = ref 0
 
@@ -27,7 +27,7 @@ let make_var t_opt klass =
   let id = !counter in
   incr counter;
   let v = { id; def = BatUref.uref t_opt; klass } in
-  VH.add vars v ();
+  VH.add gvars v None;
   v
 
 let fresh_var ?(numeric=false) () =
@@ -36,7 +36,10 @@ let fresh_var ?(numeric=false) () =
   let klass = BatUref.uref { class_id; num = numeric } in
   make_var None klass
 
-let fresh_num () = fresh_var ~numeric:true ()
+let fresh_num ?typ () =
+  let v = fresh_var ~numeric:true () in
+  VH.replace gvars v typ;
+  v
 
 let def v = BatUref.uget v.def
 let klass v = BatUref.uget v.klass
@@ -146,7 +149,8 @@ let instance schm =
   let h = VH.create n in
   Typvars.iter (fun v -> VH.add h v (fresh_var())) schm.qual;
   let rec inst t =
-    match deref t with
+    let t = deref t in
+    match t with
     | Int | Uint | Long | Bool | Unit -> t
     | Fun (t1, t2) -> Fun (inst t1, inst t2)
     | Typvar v -> Typvar (try VH.find h v with Not_found -> v)
@@ -163,9 +167,9 @@ let typ_of_annot a =
       Hashtbl.add h i v; v
   in
   let rec f = function
-  | Int -> Int
-  | Uint -> Uint
-  | Long -> Long
+  | Int -> Typvar (fresh_num ~typ:Int ())
+  | Uint -> Typvar (fresh_num ~typ:Uint ())
+  | Long -> Typvar (fresh_num ~typ:Long ())
   | Bool -> Bool
   | Unit -> Unit
   | Fun (t1, t2) -> Fun (f t1, f t2)
@@ -406,10 +410,10 @@ let collect_types =
 let iter_classes f =
   let members = Hashtbl.create 0 in
   let numeric = Hashtbl.create 0 in
-  VH.iter (fun v () ->
+  VH.iter (fun v _ ->
     let k = klass v in
     Hashtbl.replace numeric k.class_id k.num;
-    Hashtbl.add members k.class_id v) vars;
+    Hashtbl.add members k.class_id v) gvars;
   Hashtbl.iter (fun r n -> f ~numeric:n (Hashtbl.find_all members r)) numeric
 
 let filter_revmap f =
@@ -419,7 +423,8 @@ let filter_revmap f =
 let refine () =
   iter_classes (fun ~numeric vars ->
     if numeric then begin
-      let defs = filter_revmap def vars in
+      let defs = filter_revmap (fun v ->
+                                assert(def v = None); VH.find gvars v) vars in
       match defs with
       | [] -> List.iter (fun v -> define v Int) vars
       | d :: defs ->
@@ -429,7 +434,8 @@ let refine () =
     else
       match vars with
       | [] -> assert(false)
-      | v :: vars -> List.iter (fun w -> unify (Typvar v) (Typvar w)) vars)
+      | v :: vars -> List.iter (fun w ->
+                                  unify_strong (Typvar v) (Typvar w)) vars)
 
 (****)
 
