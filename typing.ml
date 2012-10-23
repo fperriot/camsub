@@ -23,17 +23,15 @@ let gvars = VH.create 0
 
 let counter = ref 0
 
+let uid() = let id = !counter in incr counter; id
+
 let make_var t_opt klass =
-  let id = !counter in
-  incr counter;
-  let v = { id; def = BatUref.uref t_opt; klass } in
+  let v = { id = uid(); def = BatUref.uref t_opt; klass } in
   VH.add gvars v None;
   v
 
 let fresh_var ?(numeric=false) () =
-  let class_id = !counter in
-  incr counter;
-  let klass = BatUref.uref { class_id; num = numeric } in
+  let klass = BatUref.uref { class_id = uid(); num = numeric } in
   make_var None klass
 
 let fresh_num ?typ () =
@@ -167,9 +165,14 @@ let typ_of_annot a =
       Hashtbl.add h i v; v
   in
   let rec f = function
+  | Int -> Int
+  | Uint -> Uint
+  | Long -> Long
+(*
   | Int -> Typvar (fresh_num ~typ:Int ())
   | Uint -> Typvar (fresh_num ~typ:Uint ())
   | Long -> Typvar (fresh_num ~typ:Long ())
+*)
   | Bool -> Bool
   | Unit -> Unit
   | Fun (t1, t2) -> Fun (f t1, f t2)
@@ -423,8 +426,7 @@ let filter_revmap f =
 let refine () =
   iter_classes (fun ~numeric vars ->
     if numeric then begin
-      let defs = filter_revmap (fun v ->
-                                assert(def v = None); VH.find gvars v) vars in
+      let defs = filter_revmap (fun v -> VH.find gvars v) vars in
       match defs with
       | [] -> List.iter (fun v -> define v Int) vars
       | d :: defs ->
