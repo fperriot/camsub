@@ -291,6 +291,23 @@ let test6 = Eq (Const 0, Eq (Const 0, Const 0))
 
 let test7 = Lambda ("x", None, App (Ident "x", Ident "x"))
 
+(* let m = fun x -> fun y -> if x < y then 0 else 1 *)
+
+let test8 =
+  Let (false, "m", None,
+    Lambda ("x", None,
+    Lambda ("y", None,
+      If (Lt (Ident "x", Ident "y"), Const 0, Const 1))))
+
+(* let m = fun x -> fun y -> if x < y then (x:int) else 1 *)
+
+let test9 =
+  Let (false, "m", None,
+    Lambda ("x", None,
+    Lambda ("y", None,
+      If (Lt (Ident "x", Ident "y"),
+        Annot (Ident "x", Int),
+        Const 1))))
 
 (****)
 
