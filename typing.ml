@@ -1,3 +1,4 @@
+open Tools
 
 type 'a typp = Int | Uint | Long | Bool | Unit | Fun of 'a typp * 'a typp
   | Typvar of 'a
