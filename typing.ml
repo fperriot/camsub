@@ -5,74 +5,49 @@ type 'a typp = Int | Uint | Long | Bool | Unit | Fun of 'a typp * 'a typp
 
 type kind = Any | Num | Iso
 
-type def = { id: int; mutable def: typvar typp option }
-and varclass = { mutable kind: kind; class_def: def; mutable meet: typ list }
-and typvar = {
-  numdef: def BatUref.t;
-  klass: varclass BatUref.t;
+type core = { id: int; mutable def: typ option }
+and typvar = core BatUref.t
+and dualvar = {
+  kind: kind BatUref.t;
+  numvar: typvar;
+  isovar: typvar;
 }
-and typ = typvar typp
+and typ = dualvar typp
 
-(* invariants:
-   kind var = Any => num def = None and class def = None
-   kind var = Num => class def = None
-   kind var = Iso => num def = None and class def = Some _
-   num def = Some _ => kind var = Num
-   class def = Some _ => kind var = Iso
-   num def = None or class def = None
-   meet contains only numeric types (therefore comparable with <)
- *)
-(* TODO
-  - add a meet field for all numeric types meeting a certain type variable
-  - update the meet when a concrete numeric type is unified with a type var
-  - do union of the meets when two type vars are unified
-  - keep a hash of all type vars ever created
-  - in the refinement step, group the vars by class
-  - assign int to all numeric vars that meet no numeric types
-  - if a class meets a single numeric type, define all vars as it
-  - remove the defined vars from the set of env free vars
- *)
+let kind v = BatUref.uget v.kind
+
+let id v = (BatUref.uget v).id
+let def v = (BatUref.uget v).def
+let define v t = (BatUref.uget v).def <- Some t
+let ddef v =
+  match kind v with
+  | Any -> None
+  | Num -> def v.numvar
+  | Iso -> def v.isovar
 
 let counter = ref 0
 
-let uid() = let id = !counter in incr counter; id
+let uid() = let c = !counter in incr counter; c
+
+let uid_pair() =
+  let c = !counter in
+  incr counter;
+  incr counter;
+  c, c+1
 
 let fresh_var ?(kind=Any) () =
-  { numdef = BatUref.uref { id = uid(); def = None };
-    klass = BatUref.uref { kind; class_def = { id = uid(); def = None };
-                           meet = [] } }
+(*
+  let id1, id2 = uid_pair() in
+*)
+  let id = uid() in
+  { kind = BatUref.uref kind;
+    numvar = BatUref.uref { id; def = None };
+    isovar = BatUref.uref { id; def = None }; }
 
 let fresh_num() = fresh_var ~kind:Num ()
 
-let klass v = BatUref.uget v.klass
-
-let core v =
-  let k = klass v in
-  match k.kind with
-  | Any
-  | Iso -> k.class_def
-  | Num -> BatUref.uget v.numdef
-
-let def v = (core v).def
-let id v = (core v).id
-let kind v = (klass v).kind
-
-let meet v t =
-  let k = klass v in
-  k.meet <- merge k.meet [t]
-
-let define v t =
-  match t with
-  | Int
-  | Uint
-  | Long -> (BatUref.uget v.numdef).def <- Some t; meet v t
-  | Bool
-  | Unit
-  | Fun _ -> (klass v).class_def.def <- Some t
-  | Typvar _ -> assert false
-
 let deref = function
-  | Typvar v -> (match def v with Some t -> t | None -> Typvar v)
+  | Typvar v -> (match ddef v with Some t -> t | None -> Typvar v)
   | t -> t
 
 module Typvar = struct
@@ -84,38 +59,38 @@ end
 
 module VH = Hashtbl.Make(Typvar)
 
-let gvars = VH.create 0
-
 let rec occur v t =
-  assert (def v = None);
+  assert (ddef v = None);
   match deref t with
   | Int | Uint | Long | Bool | Unit -> false
   | Fun (t1, t2) -> occur v t1 || occur v t2
-  | Typvar w -> Typvar.equal v w
+  | Typvar v' -> Typvar.equal v.isovar v'.isovar
 
 exception Unification_failure
 exception Recursive_type
 
 let rec unify ?(weak=true) t t' =
   let var_with_numeric v t =
-    let k = klass v in
-    begin match k.kind with
-    | Any -> k.kind <- Num
+    begin match kind v with
+    | Any -> BatUref.uset v.kind Num
     | Num -> ()
     | Iso -> raise Unification_failure
     end;
-    meet v t;
-    if not weak then define v t
+    if not weak then begin
+      match def v.numvar with
+      | None -> define v.numvar t (* TODO decommission sibling isovar *)
+      | Some t' -> if t <> t' then raise Unification_failure
+    end
   in
   let var_with_nonnumeric v t =
     if occur v t then raise Recursive_type;
-    let k = klass v in
-    begin match k.kind with
-    | Any -> k.kind <- Iso
+    begin match kind v with
+    | Any -> BatUref.uset v.kind Iso
     | Num -> raise Unification_failure
     | Iso -> assert false
     end;
-    define v t
+    assert (def v.isovar = None);
+    define v.isovar t (* TODO decommission sibling numvar *)
   in
   let t, t' = deref t, deref t' in
   match t, t' with
@@ -144,29 +119,22 @@ let rec unify ?(weak=true) t t' =
   | Typvar v, Bool
   | Typvar v, Unit
   | Typvar v, Fun _ -> var_with_nonnumeric v t'
-  | Typvar v, Typvar w ->
-    if not (BatUref.equal v.klass w.klass) then begin
-      let sel kv kw =
-        let kind, def =
-          match kv.kind, kv.class_def.def, kw.kind, kw.class_def.def with
-          | Any, Some _, _, _
-          | Num, Some _, _, _
-          | _, _, Any, Some _
-          | _, _, Num, Some _
-          | Iso, _, _, _
-          | _, _, Iso, _ -> assert false
-          | Any, None, Any, None -> Any, None
-          | Any, None, Num, None
-          | Num, None, Any, None
-          | Num, None, Num, None -> Num, None
-        in
-        { kind; class_def = { id = kv.class_def.id; def };
-          meet = merge kv.meet kw.meet }
-      in
-      BatUref.unite ~sel v.klass w.klass;
-    end;
-    if not weak then
-      BatUref.unite v.numdef w.numdef
+  | Typvar v, Typvar v' ->
+    let sel k1 k2 =
+      match k1, k2 with
+      | Any, Any -> Any
+      | Any, Num
+      | Num, Any
+      | Num, Num -> Num
+      | Any, Iso
+      | Iso, Any
+      | Iso, Iso -> assert false
+      | Num, Iso
+      | Iso, Num -> raise Unification_failure
+    in
+    BatUref.unite ~sel v.kind v'.kind;
+    BatUref.unite v.isovar v'.isovar;
+    if not weak then BatUref.unite v.numvar v'.numvar
   | Int, _
   | Uint, _
   | Long, _
@@ -184,7 +152,7 @@ let rec free_vars_of_typ t =
   | Fun (t1, t2) -> Typvars.union (free_vars_of_typ t1)
                                   (free_vars_of_typ t2)
   | Typvar v ->
-    if kind v = Any then Typvars.singleton v else Typvars.empty
+    if kind v = Any then Typvars.singleton v.isovar else Typvars.empty
 
 type scheme = {
   qual: Typvars.t;    (* Universally qualified type variables *)
@@ -205,7 +173,7 @@ let instance schm =
     match t with
     | Int | Uint | Long | Bool | Unit -> t
     | Fun (t1, t2) -> Fun (inst t1, inst t2)
-    | Typvar v -> Typvar (try VH.find h v with Not_found -> v)
+    | Typvar v -> Typvar (try VH.find h v.isovar with Not_found -> v)
   in
   inst schm.shape
 
@@ -480,7 +448,7 @@ let collect_types =
   - reparse the tree and verify that all +, <, =, <- operators have compatible
     arguments
 *)
-
+(*
 let iter_classes f =
   let members = Hashtbl.create 0 in
   let kind = Hashtbl.create 0 in
@@ -550,7 +518,7 @@ let s_texpr = function
 | TSum (a, b) -> s_texpr a ^ " + " ^ s_texpr b
 | TVar (id, _, e) -> "var " ^ id ^ " = " ^ s_texpr e ^ ";"
 *)
-
+*)
 (****)
 
 
