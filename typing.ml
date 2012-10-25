@@ -6,12 +6,22 @@ type 'a typp = Int | Uint | Long | Bool | Unit | Fun of 'a typp * 'a typp
 type kind = Any | Num | Iso
 
 type def = { id: int; mutable def: typvar typp option }
-and varclass = { mutable kind: kind; class_def: def; }
+and varclass = { mutable kind: kind; class_def: def; mutable meet: typ list }
 and typvar = {
   numdef: def BatUref.t;
   klass: varclass BatUref.t;
 }
+and typ = typvar typp
 
+(* invariants:
+   kind var = Any => num def = None and class def = None
+   kind var = Num => class def = None
+   kind var = Iso => num def = None and class def = Some _
+   num def = Some _ => kind var = Num
+   class def = Some _ => kind var = Iso
+   num def = None or class def = None
+   meet contains only numeric types (therefore comparable with <)
+ *)
 (* TODO
   - add a meet field for all numeric types meeting a certain type variable
   - update the meet when a concrete numeric type is unified with a type var
@@ -23,24 +33,14 @@ and typvar = {
   - remove the defined vars from the set of env free vars
  *)
 
-type typ = typvar typp
-
 let counter = ref 0
 
 let uid() = let id = !counter in incr counter; id
 
 let fresh_var ?(kind=Any) () =
   { numdef = BatUref.uref { id = uid(); def = None };
-    klass = BatUref.uref { kind; class_def = { id = uid(); def = None } } }
-
-(* invariants:
-   kind var = Any => def = None and class def = None
-   kind var = Num => class def = None
-   kind var = Iso => def = None and class def = Some _
-   def = Some _ => kind var = Num
-   class def = Some _ => kind var = Iso
-   def = None or class def = None
- *)
+    klass = BatUref.uref { kind; class_def = { id = uid(); def = None };
+                           meet = [] } }
 
 let fresh_num() = fresh_var ~kind:Num ()
 
@@ -56,11 +56,16 @@ let core v =
 let def v = (core v).def
 let id v = (core v).id
 let kind v = (klass v).kind
+
+let meet v t =
+  let k = klass v in
+  k.meet <- merge k.meet [t]
+
 let define v t =
   match t with
   | Int
   | Uint
-  | Long -> (BatUref.uget v.numdef).def <- Some t
+  | Long -> (BatUref.uget v.numdef).def <- Some t; meet v t
   | Bool
   | Unit
   | Fun _ -> (klass v).class_def.def <- Some t
@@ -99,6 +104,7 @@ let rec unify ?(weak=true) t t' =
     | Num -> ()
     | Iso -> raise Unification_failure
     end;
+    meet v t;
     if not weak then define v t
   in
   let var_with_nonnumeric v t =
@@ -154,7 +160,8 @@ let rec unify ?(weak=true) t t' =
           | Num, None, Any, None
           | Num, None, Num, None -> Num, None
         in
-        { kind; class_def = { id = kv.class_def.id; def } }
+        { kind; class_def = { id = kv.class_def.id; def };
+          meet = merge kv.meet kw.meet }
       in
       BatUref.unite ~sel v.klass w.klass;
     end;
