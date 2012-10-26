@@ -7,14 +7,16 @@ module type V = sig
   val hash: t -> int
 end
 
-module Graph(V: V) = struct
+module Make(V: V) = struct
 
 module H = Hashtbl.Make(V)
 
 type adj = unit H.t (* adjacency lists are actually hash tables *)
 type t = { adj: adj H.t }
 
-let create () = { adj = H.create 0 }
+let create n = { adj = H.create n }
+
+let clear g = H.clear g.adj
 
 let add_vertex g v =
   if not (H.mem g.adj v) then
@@ -62,15 +64,16 @@ let merge_vertices g u v =
      2. merge v's adjacency list into u's
      3. remove any u-u self-loop we might have created
      4. remove v *)
-  try
-    H.iter (fun x ax ->
-      if H.mem ax v then (H.remove ax v; H.replace ax u ())) g.adj;
-    let au = H.find g.adj u in
-    iter_adj g v (fun x -> H.replace au x ());
-    H.remove au u;
-    H.remove g.adj v
-  with
-  Not_found -> ()
+  if not (V.equal u v) then
+    try
+      H.iter (fun x ax ->
+        if H.mem ax v then (H.remove ax v; H.replace ax u ())) g.adj;
+      let au = H.find g.adj u in
+      iter_adj g v (fun x -> H.replace au x ());
+      H.remove au u;
+      H.remove g.adj v
+    with
+    Not_found -> ()
 
 module VSet = Set.Make(V)
 

@@ -42,11 +42,12 @@ let uid_pair() =
   incr counter;
   c, c+1
 
-let deref = function
-  | Typvar v -> (match eitherdef v with Some t -> t | None -> Typvar v)
-  | t -> t
+(* Note: it's important to dereference definitions of isolated-type variables
+   but not of numeric-type variables, because it allows for weak unification
+   of numeric-type variables even though some of them may already be defined
+ *)
 
-let isoderef = function
+let deref = function
   | Typvar v -> (match isodef v with Some t -> t | None -> Typvar v)
   | t -> t
 
@@ -57,22 +58,28 @@ module Typvar = struct
   let hash a = id a
 end
 
+module G = Hgraph.Make(Typvar)
+
+let g = G.create 0
+
 let fresh_var ?(kind=Any) () =
   let id = uid() in
+  let numvar = BatUref.uref { id; def = None } in
+  G.add_vertex g numvar;
+  Printf.printf "Adding vertex %d\n" id;
   { kind = BatUref.uref kind;
-    numvar = BatUref.uref { id; def = None };
-    isovar = BatUref.uref { id; def = None }; }
+    numvar;
+    isovar = BatUref.uref { id; def = None } }
 
 let fresh_num() = fresh_var ~kind:Num ()
 
 module VH = Hashtbl.Make(Typvar)
 
 let rec occur v t =
-  assert (eitherdef v = None);
   match deref t with
   | Int | Uint | Long | Bool | Unit -> false
   | Fun (t1, t2) -> occur v t1 || occur v t2
-  | Typvar v' -> Typvar.equal v.isovar v'.isovar
+  | Typvar v' -> Typvar.equal v v'.isovar
 
 exception Unification_failure
 exception Recursive_type
@@ -91,7 +98,7 @@ let rec unify ?(weak=true) t t' =
     end
   in
   let var_with_nonnumeric v t =
-    if occur v t then raise Recursive_type;
+    if occur v.isovar t then raise Recursive_type;
     begin match kind v with
     | Any -> BatUref.uset v.kind Iso
     | Num -> raise Unification_failure
@@ -100,7 +107,7 @@ let rec unify ?(weak=true) t t' =
     assert (def v.isovar = None);
     define v.isovar t (* TODO decommission sibling numvar *)
   in
-  let t, t' = isoderef t, isoderef t' in
+  let t, t' = deref t, deref t' in
   match t, t' with
   | Int, Int
   | Uint, Uint
@@ -142,7 +149,12 @@ let rec unify ?(weak=true) t t' =
     in
     BatUref.unite ~sel v.kind v'.kind;
     BatUref.unite v.isovar v'.isovar;
-    if not weak then
+    if weak then begin
+      Printf.printf "Creating edge %d-%d\n" (id v.numvar) (id v'.numvar);
+      G.add_edge g v.numvar v'.numvar
+    end else begin
+      Printf.printf "Merging %d and %d\n" (id v.numvar) (id v'.numvar);
+      G.merge_vertices g v.numvar v'.numvar;
       let sel n1 n2 =
         let def =
           match n1.def, n2.def with
@@ -155,6 +167,7 @@ let rec unify ?(weak=true) t t' =
         { id = n1.id; def }
       in
       BatUref.unite ~sel v.numvar v'.numvar
+    end
   | Int, _
   | Uint, _
   | Long, _
@@ -374,11 +387,11 @@ let rec infer env expr =
     let env = Env.add id schm env in
     { expr = TVar (id, te.typ, te); typ = Unit }, env
   | Let (rec_, id, annot, e) ->
-    let typ =
-      match annot with
-      | Some a -> typ_of_annot a
-      | None -> Typvar (fresh_var())
-    in
+    let typ = Typvar (fresh_var()) in
+    begin match annot with
+    | Some a -> unify_strong typ (typ_of_annot a)
+    | None -> ()
+    end;
     let inner_env = if rec_ then Env.add id (mono typ) env else env in
     let te, _ = infer inner_env e in
     unify_strong typ te.typ;
@@ -386,11 +399,11 @@ let rec infer env expr =
     let env = Env.add id schm env in
     { expr = TLet (rec_, id, typ, te); typ = Unit }, env
   | Lambda (arg, annot, e) ->
-    let arg_typ =
-      match annot with
-      | Some a -> typ_of_annot a
-      | None -> Typvar (fresh_var())
-    in
+    let arg_typ = Typvar (fresh_var()) in
+    begin match annot with
+      | Some a -> unify_strong arg_typ (typ_of_annot a)
+      | None -> ()
+    end;
     let inner_env = Env.add arg (mono arg_typ) env in
     let te, _ = infer inner_env e in
     { expr = TLambda (arg, arg_typ, te); typ = Fun (arg_typ, te.typ) }, env
@@ -419,86 +432,6 @@ let rec infer env expr =
     unify te1.typ te2.typ;
     { expr = TAssign (te1, te2); typ = Unit }, env
 
-(*
-let rec fold f v e =
-  match e.expr with
-  | TVoid
-  | TConst _
-  | TIdent _ -> f v e
-  | TSeq (e1, e2)
-  | TAssign (e1, e2)
-  | TApp (e1, e2)
-  | TEq (e1, e2)
-  | TLt (e1, e2)
-  | TSum (e1, e2) -> fold f (f (fold f v e1) e) e2
-  | TIf (e1, e2, e3) -> fold f (fold f (fold f (f v e) e1) e2) e3
-  | TVar (_, _, e1)
-  | TLet (_, _, _, e1)
-  | TLambda (_, _, e1) -> fold f (f v e) e1
-
-let collect_types =
-  fold (fun acc e ->
-    match e.expr with
-    | TLet (_, _, t, _)
-    | TVar (_, t, _)
-    | TLambda (_, t, _) -> t :: e.typ :: acc
-    | TVoid
-    | TConst _
-    | TIdent _
-    | TSeq _
-    | TAssign _
-    | TApp _
-    | TEq _
-    | TLt _
-    | TSum _
-    | TIf _ -> e.typ :: acc) []
-*)
-
-(* TODO
-  - gather all type variables from the vars hash table
-  - group the vars by class
-  - unify all vars in non-numeric classes (Should it be done in the second
-    pass on the typed tree?)
-  - if there's a class where all vars are defined, just rely on type-checking
-    to make sure all the types are compatible with the operators
-  - if there's a numeric class without any def, define the whole class as int
-  - if there's a class with some undefined vars, and the rest of the vars all
-    defined as the same type, define the whole class as this common type
-  - otherwise, leave the vars undefined and rely on bottom-up type-checking
-  - reparse the tree and verify that all +, <, =, <- operators have compatible
-    arguments
-*)
-(*
-let iter_classes f =
-  let members = Hashtbl.create 0 in
-  let kind = Hashtbl.create 0 in
-  VH.iter (fun v _ ->
-    let k = klass v in
-    Hashtbl.replace kind k.class_def.id k.kind;
-    Hashtbl.add members k.class_def.id v) gvars;
-  Hashtbl.iter (fun r k -> f ~numeric:(k = Num) (Hashtbl.find_all members r)) kind
-
-let filter_revmap f =
-  List.fold_left (fun acc x -> match f x with Some r -> r :: acc
-                                            | None -> acc) []
-
-let refine () =
-  iter_classes (fun ~numeric vars ->
-    if numeric then begin
-      let defs = filter_revmap (fun v -> VH.find gvars v) vars in
-      match defs with
-      | [] -> List.iter (fun v -> define v Int) vars
-      | d :: defs ->
-        if List.for_all (( = ) d) defs then
-          List.iter (fun v -> define v d) vars
-      end
-    else
-      match vars with
-      | [] -> assert(false)
-      | v :: vars -> List.iter (fun w ->
-                                  unify_strong (Typvar v) (Typvar w)) vars)
-
-*)
 (****)
 
 open Printf
@@ -543,5 +476,17 @@ let s_texpr = function
 | TVar (id, _, e) -> "var " ^ id ^ " = " ^ s_texpr e ^ ";"
 *)
 (****)
+
+let refine () =
+  G.iter_ccs g (fun vars ->
+    printf "CC:";
+    List.iter (fun v -> printf " %d" (id v)) vars;
+    printf "\n";
+    let defs = filter_revmap def vars in
+    match defs with
+    | [] -> List.iter (fun v -> define v Int) vars
+    | d :: defs ->
+      if List.for_all (( = ) d) defs then
+        List.iter (fun v -> define v d) vars)
 
 

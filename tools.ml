@@ -14,3 +14,8 @@ let merge a b =
   in
   loop a b []
 
+let filter_revmap f =
+  List.fold_left (fun acc x -> match f x with Some r -> r :: acc
+                                            | None -> acc) []
+
+
