@@ -19,10 +19,17 @@ let kind v = BatUref.uget v.kind
 let id v = (BatUref.uget v).id
 let def v = (BatUref.uget v).def
 let define v t = (BatUref.uget v).def <- Some t
-let ddef v =
+
+let eitherdef v =
   match kind v with
   | Any -> None
   | Num -> def v.numvar
+  | Iso -> def v.isovar
+
+let isodef v =
+  match kind v with
+  | Any -> None
+  | Num -> None
   | Iso -> def v.isovar
 
 let counter = ref 0
@@ -35,19 +42,12 @@ let uid_pair() =
   incr counter;
   c, c+1
 
-let fresh_var ?(kind=Any) () =
-(*
-  let id1, id2 = uid_pair() in
-*)
-  let id = uid() in
-  { kind = BatUref.uref kind;
-    numvar = BatUref.uref { id; def = None };
-    isovar = BatUref.uref { id; def = None }; }
-
-let fresh_num() = fresh_var ~kind:Num ()
-
 let deref = function
-  | Typvar v -> (match ddef v with Some t -> t | None -> Typvar v)
+  | Typvar v -> (match eitherdef v with Some t -> t | None -> Typvar v)
+  | t -> t
+
+let isoderef = function
+  | Typvar v -> (match isodef v with Some t -> t | None -> Typvar v)
   | t -> t
 
 module Typvar = struct
@@ -57,10 +57,18 @@ module Typvar = struct
   let hash a = id a
 end
 
+let fresh_var ?(kind=Any) () =
+  let id = uid() in
+  { kind = BatUref.uref kind;
+    numvar = BatUref.uref { id; def = None };
+    isovar = BatUref.uref { id; def = None }; }
+
+let fresh_num() = fresh_var ~kind:Num ()
+
 module VH = Hashtbl.Make(Typvar)
 
 let rec occur v t =
-  assert (ddef v = None);
+  assert (eitherdef v = None);
   match deref t with
   | Int | Uint | Long | Bool | Unit -> false
   | Fun (t1, t2) -> occur v t1 || occur v t2
@@ -92,7 +100,7 @@ let rec unify ?(weak=true) t t' =
     assert (def v.isovar = None);
     define v.isovar t (* TODO decommission sibling numvar *)
   in
-  let t, t' = deref t, deref t' in
+  let t, t' = isoderef t, isoderef t' in
   match t, t' with
   | Int, Int
   | Uint, Uint
@@ -134,7 +142,19 @@ let rec unify ?(weak=true) t t' =
     in
     BatUref.unite ~sel v.kind v'.kind;
     BatUref.unite v.isovar v'.isovar;
-    if not weak then BatUref.unite v.numvar v'.numvar
+    if not weak then
+      let sel n1 n2 =
+        let def =
+          match n1.def, n2.def with
+          | None, None -> None
+          | None, Some x
+          | Some x, None -> Some x
+          | Some x, Some y ->
+            if x = y then Some x else raise Unification_failure
+        in
+        { id = n1.id; def }
+      in
+      BatUref.unite ~sel v.numvar v'.numvar
   | Int, _
   | Uint, _
   | Long, _
@@ -478,6 +498,7 @@ let refine () =
       | v :: vars -> List.iter (fun w ->
                                   unify_strong (Typvar v) (Typvar w)) vars)
 
+*)
 (****)
 
 open Printf
@@ -492,10 +513,13 @@ let rec s_typ = function
 | Typvar v -> s_var v
 
 and s_var v =
-  match def v with
+  match eitherdef v with
   | None ->
-    let i = string_of_int (id v) in
-    if kind v = Num then "N" ^ i else i
+    begin match kind v with
+    | Any -> "N" ^ string_of_int (id v.numvar) ^ "," ^ string_of_int (id v.isovar)
+    | Num -> "N" ^ string_of_int (id v.numvar)
+    | Iso -> string_of_int (id v.isovar)
+    end
   | Some t -> s_typ t
 
 let s_set vars =
@@ -517,7 +541,6 @@ let s_texpr = function
 | TLt (a, b) -> s_texpr a ^ " < " ^ s_texpr b
 | TSum (a, b) -> s_texpr a ^ " + " ^ s_texpr b
 | TVar (id, _, e) -> "var " ^ id ^ " = " ^ s_texpr e ^ ";"
-*)
 *)
 (****)
 
