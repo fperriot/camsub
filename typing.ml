@@ -32,15 +32,13 @@ let isodef v =
   | Num -> None
   | Iso -> def v.isovar
 
+let numvar = function
+  | Typvar v -> v.numvar
+  | _ -> failwith "Not a numeric type variable"
+
 let counter = ref 0
 
 let uid() = let c = !counter in incr counter; c
-
-let uid_pair() =
-  let c = !counter in
-  incr counter;
-  incr counter;
-  c, c+1
 
 (* Note: it's important to dereference definitions of isolated-type variables
    but not of numeric-type variables, because it allows for weak unification
@@ -59,13 +57,16 @@ module Typvar = struct
 end
 
 module G = Hgraph.Undirected(Typvar)
+module D = Hgraph.Directed(Typvar)
 
 let g = G.create 0
+let subtype = D.create 0
 
 let fresh_var ?(kind=Any) () =
   let id = uid() in
   let numvar = BatUref.uref { id; def = None } in
   G.add_vertex g numvar;
+  D.add_vertex subtype numvar;
   Printf.printf "Adding vertex %d\n" id;
   { kind = BatUref.uref kind;
     numvar;
@@ -155,6 +156,7 @@ let rec unify ?(weak=true) t t' =
     end else begin
       Printf.printf "Merging %d and %d\n" (id v.numvar) (id v'.numvar);
       G.merge_vertices g v.numvar v'.numvar;
+      D.merge_vertices subtype v.numvar v'.numvar;
       let sel n1 n2 =
         let def =
           match n1.def, n2.def with
@@ -223,11 +225,6 @@ let typ_of_annot a =
   | Int -> Int
   | Uint -> Uint
   | Long -> Long
-(*
-  | Int -> Typvar (fresh_num ~typ:Int ())
-  | Uint -> Typvar (fresh_num ~typ:Uint ())
-  | Long -> Typvar (fresh_num ~typ:Long ())
-*)
   | Bool -> Bool
   | Unit -> Unit
   | Fun (t1, t2) -> Fun (f t1, f t2)
@@ -376,6 +373,13 @@ let rec infer env expr =
     let typ = Typvar (fresh_num()) in
     unify te1.typ te2.typ;
     unify te1.typ typ;
+    let v = numvar typ in
+    let v1 = numvar te1.typ in
+    let v2 = numvar te2.typ in
+    Printf.printf "Creating edge %d <: %d\n" (id v1) (id v);
+    Printf.printf "Creating edge %d <: %d\n" (id v2) (id v);
+    D.add_edge subtype v1 v;
+    D.add_edge subtype v2 v;
     { expr = TSum (te1, te2); typ }, env
   | Var (id, annot, e) ->
     let te, _ = infer env e in
