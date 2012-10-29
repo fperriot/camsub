@@ -58,7 +58,7 @@ module Typvar = struct
   let hash a = id a
 end
 
-module G = Hgraph.Make(Typvar)
+module G = Hgraph.Undirected(Typvar)
 
 let g = G.create 0
 
