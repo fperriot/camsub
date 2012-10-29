@@ -18,10 +18,10 @@ let filter_revmap f =
   List.fold_left (fun acc x -> match f x with Some r -> r :: acc
                                             | None -> acc) []
 
-module Fixpoint(F: sig type t val eq: t -> t -> bool val f: t -> t end) =
+module Fixpoint(Dom: sig type t val eq: t -> t -> bool end) =
 struct
-let rec from init =
-  let next = F.f init in
-  if F.eq next init then init else from next
+let rec fix f v =
+  let x = f v in
+  if Dom.eq x v then v else fix f x
 end
 

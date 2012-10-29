@@ -3,6 +3,26 @@ open Tools
 type 'a typp = Int | Uint | Long | Bool | Unit | Fun of 'a typp * 'a typp
   | Typvar of 'a
 
+let num_upper_bound n1 n2 =
+  match n1, n2 with
+  | Int, Int -> Int
+  | Uint, Uint -> Uint
+  | Long, Long
+  | Long, Int
+  | Long, Uint
+  | Int, Long
+  | Uint, Long
+  | Int, Uint
+  | Uint, Int -> Long
+  | Bool, _
+  | Unit, _
+  | Fun _, _
+  | Typvar _, _
+  | _, Bool
+  | _, Unit
+  | _, Fun _
+  | _, Typvar _ -> assert false
+
 type kind = Any | Num | Iso
 
 type core = { id: int; mutable def: typ option }
@@ -59,8 +79,8 @@ end
 module G = Hgraph.Undirected(Typvar)
 module D = Hgraph.Directed(Typvar)
 
-let g = G.create 0
-let subtype = D.create 0
+let g = G.create 10
+let subtype = D.create 10
 
 let fresh_var ?(kind=Any) () =
   let id = uid() in
@@ -215,7 +235,7 @@ let instance schm =
 type annot = int typp
 
 let typ_of_annot a =
-  let h = Hashtbl.create 0 in
+  let h = Hashtbl.create 3 in
   let v i =
     try Hashtbl.find h i with Not_found ->
       let v = fresh_var() in
@@ -314,6 +334,18 @@ let test9 =
       If (Lt (Ident "x", Ident "y"),
         Annot (Ident "x", Int),
         Const 1))))
+
+(* let x = { var a = 0; var b = 0; if 0 = 0 then a <- b + (int 1)
+                                            else b <- a + (long 1); a } *)
+
+let test10 =
+  Let (false, "x", None,
+  Seq (Var ("a", None, Const 0),
+  Seq (Var ("b", None, Const 0),
+  Seq (If (Eq (Const 0, Const 0),
+        Assign (Ident "a", Sum (Ident "b", Annot (Const 1, Int))),
+        Assign (Ident "b", Sum (Ident "a", Annot (Const 1, Long)))),
+    Ident "a"))))
 
 (****)
 
@@ -493,4 +525,42 @@ let refine () =
       if List.for_all (( = ) d) defs then
         List.iter (fun v -> define v d) vars)
 
+module Vardefs = struct
+  type t = typ option VH.t
+  exception Diff
+  let eq h1 h2 =
+    VH.length h1 = VH.length h2 &&
+    try
+      VH.iter (fun v d -> if VH.find h2 v <> d then raise Diff) h1; true
+    with
+    Not_found | Diff -> false
+end
+
+module Fix = Fixpoint(Vardefs)
+
+let relax v def =
+  printf "Relaxing %d\n" (id v);
+  let upper a b =
+    match a, b with
+    | None, None -> None
+    | None, Some x
+    | Some x, None -> Some x
+    | Some x, Some y -> Some (num_upper_bound x y)
+  in
+  D.fold_pred subtype v (fun u x -> upper (def u) x) None
+
+let fixpts () =
+  let sccs = D.scc_array subtype in
+  for i = Array.length sccs - 1 downto 0 do
+    let undef = List.filter (fun v -> def v = None) sccs.(i) in
+    List.iter (fun v -> printf "Undef: %d\n" (id v)) undef;
+    let n = List.length undef in
+    let d = VH.create n in
+    List.iter (fun v -> VH.add d v None) undef;
+    let f d =
+      List.iter (fun v -> VH.replace d v (relax v (VH.find d))) undef; d
+    in
+    let d = Fix.fix f d in
+    VH.iter (fun v d -> match d with None -> () | Some t -> define v t) d
+  done
 

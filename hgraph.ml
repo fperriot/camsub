@@ -138,6 +138,13 @@ let iter_pred g v f =
   with
   Not_found -> ()
 
+let fold_pred g v f x =
+  try
+    let pv = H.find g.pred v in
+    H.fold (fun u () x -> f u x) pv x
+  with
+  Not_found -> x
+
 let iter_succ g v f =
   try
     let sv = H.find g.succ v in
@@ -170,6 +177,20 @@ let merge_vertices g u v =
   with
   Not_found -> ()
 
+let induced g vs =
+  let n = List.length vs in
+  let s = { pred = H.create n; succ = H.create n } in
+  List.iter (fun v -> H.add s.pred v (H.create 10);
+                      H.add s.succ v (H.create 10)) vs;
+  List.iter (fun v ->
+    let pg = H.find g.pred v in
+    let sg = H.find g.succ v in
+    let pv = H.find s.pred v in
+    let sv = H.find s.succ v in
+    H.iter (fun p () -> if H.mem s.pred p then H.add pv p ()) pg;
+    H.iter (fun p () -> if H.mem s.pred p then H.add sv p ()) sg) vs;
+  s
+
 type g = t
 
 module G = struct
@@ -177,10 +198,19 @@ module G = struct
   module V = V
   let iter_vertex f g = H.iter (fun v _ -> f v) g.pred
   let iter_succ f g v = iter_succ g v f
+  let in_degree g v = H.length (H.find g.pred v)
 end
-module OCGC = Graph.Components.Make(G)
+module Comp = Graph.Components.Make(G)
+module Topo = Graph.Topological.Make(G)
 
-let scc_array g = OCGC.scc_array g
+let scc_array g =
+  let a = Comp.scc_array g in
+  let topo scc =
+    let subg = induced g scc in
+    List.rev (Topo.fold (fun v lst -> v :: lst) subg [])
+  in
+  Array.iteri (fun i scc -> a.(i) <- topo scc) a;
+  a
 
 end
 
