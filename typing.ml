@@ -52,10 +52,6 @@ let isodef v =
   | Num -> None
   | Iso -> def v.isovar
 
-let numvar = function
-  | Typvar v -> v.numvar
-  | _ -> failwith "Not a numeric type variable"
-
 let counter = ref 0
 
 let uid() = let c = !counter in incr counter; c
@@ -198,6 +194,24 @@ let rec unify ?(weak=true) t t' =
   | Fun _, _ -> raise Unification_failure
 
 and unify_strong t t' = unify ~weak:false t t'
+
+let ( <: ) a b =
+  match a, b with
+  | Int, _
+  | Uint, _
+  | Long, _
+  | Bool, _
+  | Unit, _
+  | Fun _, _
+  | _, Int
+  | _, Uint
+  | _, Long
+  | _, Bool
+  | _, Unit
+  | _, Fun _ -> ()
+  | Typvar a, Typvar b ->
+    Printf.printf "Creating edge %d <: %d\n" (id a.numvar) (id b.numvar);
+    D.add_edge subtype a.numvar b.numvar
 
 module Typvars = Set.Make(Typvar)
 
@@ -405,13 +419,8 @@ let rec infer env expr =
     let typ = Typvar (fresh_num()) in
     unify te1.typ te2.typ;
     unify te1.typ typ;
-    let v = numvar typ in
-    let v1 = numvar te1.typ in
-    let v2 = numvar te2.typ in
-    Printf.printf "Creating edge %d <: %d\n" (id v1) (id v);
-    Printf.printf "Creating edge %d <: %d\n" (id v2) (id v);
-    D.add_edge subtype v1 v;
-    D.add_edge subtype v2 v;
+    te1.typ <: typ;
+    te2.typ <: typ;
     { expr = TSum (te1, te2); typ }, env
   | Var (id, annot, e) ->
     let te, _ = infer env e in
@@ -450,6 +459,7 @@ let rec infer env expr =
     let ret_typ = Typvar (fresh_var()) in
     unify_strong te1.typ (Fun (arg_typ, ret_typ));
     unify te2.typ arg_typ;
+    te2.typ <: arg_typ;
     { expr = TApp (te1, te2); typ = ret_typ }, env
   | Annot (e, annot) ->
     let te, _ = infer env e in
@@ -466,6 +476,7 @@ let rec infer env expr =
     let te1, _ = infer env e1 in
     let te2, _ = infer env e2 in
     unify te1.typ te2.typ;
+    te2.typ <: te1.typ;
     { expr = TAssign (te1, te2); typ = Unit }, env
 
 (****)
@@ -526,19 +537,17 @@ let refine () =
         List.iter (fun v -> define v d) vars)
 
 module Vardefs = struct
-  type t = typ option VH.t
-  exception Diff
-  let eq h1 h2 =
-    VH.length h1 = VH.length h2 &&
-    try
-      VH.iter (fun v d -> if VH.find h2 v <> d then raise Diff) h1; true
-    with
-    Not_found | Diff -> false
+  type t = typ option list
+  let eq = List.for_all2 ( = )
 end
 
 module Fix = Fixpoint(Vardefs)
 
-let relax v def =
+let rec fix f v =
+  let stable, x = f v in
+  if stable then v else fix f x
+
+let relax v =
   printf "Relaxing %d\n" (id v);
   let upper a b =
     match a, b with
@@ -547,20 +556,20 @@ let relax v def =
     | Some x, None -> Some x
     | Some x, Some y -> Some (num_upper_bound x y)
   in
-  D.fold_pred subtype v (fun u x -> upper (def u) x) None
+  let change =
+    match D.fold_pred subtype v (fun u x -> upper (def u) x) None with
+    | None -> false
+    | Some t as newdef -> let prev = def v in define v t; newdef <> prev
+  in
+  change
 
 let fixpts () =
   let sccs = D.scc_array subtype in
   for i = Array.length sccs - 1 downto 0 do
     let undef = List.filter (fun v -> def v = None) sccs.(i) in
-    List.iter (fun v -> printf "Undef: %d\n" (id v)) undef;
-    let n = List.length undef in
-    let d = VH.create n in
-    List.iter (fun v -> VH.add d v None) undef;
-    let f d =
-      List.iter (fun v -> VH.replace d v (relax v (VH.find d))) undef; d
+    let f() =
+      List.fold_left (fun stable v -> not (relax v) && stable) true undef, ()
     in
-    let d = Fix.fix f d in
-    VH.iter (fun v d -> match d with None -> () | Some t -> define v t) d
+    fix f ()
   done
 
